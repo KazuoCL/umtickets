@@ -26,12 +26,13 @@
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
         .loading-overlay {
-            display: none;
+            display: flex;
             position: fixed;
             inset: 0;
-            background: rgba(255,255,255,0.7);
+            background: rgba(255,255,255,0.8);
             z-index: 100;
             place-items: center;
+            justify-content: center;
         }
     </style>
 </head>
@@ -133,8 +134,8 @@
         <div class="glass-card overflow-hidden">
             <div class="p-6 border-b border-slate-100 flex items-center justify-between">
                 <h2 class="text-lg font-extrabold text-slate-800">Rendimiento Last Mile</h2>
-                <span id="syncIndicator" class="text-[10px] font-bold text-emerald-500 uppercase flex items-center gap-1">
-                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Sincronizado
+                <span id="syncIndicator" class="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1">
+                    <span id="syncDot" class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> <span id="syncText">Iniciando...</span>
                 </span>
             </div>
             <div class="overflow-x-auto">
@@ -178,7 +179,7 @@
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Configuración de Firebase (Datos públicos para entorno demo/estático)
+        // Configuración
         const firebaseConfig = JSON.parse(__firebase_config);
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
@@ -187,20 +188,46 @@
 
         let rawData = { reversso: [], adereso: [] };
         let charts = {};
+        let currentUser = null;
         const loader = document.getElementById('loader');
 
-        // Autenticación inicial
+        // Inicialización con Auth Guard
         async function init() {
             try {
-                await signInAnonymously(auth);
-                listenToData();
+                // PRIMERO: Autenticar y esperar
+                const userCredential = await signInAnonymously(auth);
+                currentUser = userCredential.user;
+                
+                // SEGUNDO: Solo si hay usuario, escuchar datos
+                if (currentUser) {
+                    listenToData();
+                    updateSyncStatus('connected');
+                }
             } catch (error) {
                 console.error("Auth error:", error);
+                updateSyncStatus('error');
+                loader.style.display = 'none';
+            }
+        }
+
+        function updateSyncStatus(status) {
+            const dot = document.getElementById('syncDot');
+            const text = document.getElementById('syncText');
+            if (status === 'connected') {
+                dot.className = "w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse";
+                text.innerText = "Sincronizado";
+                text.className = "text-emerald-500";
+            } else if (status === 'error') {
+                dot.className = "w-1.5 h-1.5 rounded-full bg-rose-500";
+                text.innerText = "Error de conexión";
+                text.className = "text-rose-500";
             }
         }
 
         // Escuchar datos de la base de datos
         function listenToData() {
+            if (!currentUser) return;
+
             const dataPath = collection(db, 'artifacts', appId, 'public', 'data', 'ticketsData');
             
             onSnapshot(dataPath, (snapshot) => {
@@ -215,25 +242,33 @@
                 refreshDashboard();
                 loader.style.display = 'none';
             }, (error) => {
-                console.error("Firestore error:", error);
+                console.error("Firestore Permission/Fetch Error:", error);
+                updateSyncStatus('error');
+                loader.style.display = 'none';
             });
         }
 
         // Subir datos a la nube
         async function uploadToCloud(key, data) {
-            loader.style.display = 'grid';
+            if (!currentUser) {
+                alert("No hay sesión activa. Reintentando...");
+                await init();
+                if (!currentUser) return;
+            }
+
+            loader.style.display = 'flex';
             try {
                 const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'ticketsData', key);
                 await setDoc(docRef, { items: data, lastUpdate: new Date().toISOString() });
             } catch (error) {
                 console.error("Upload error:", error);
-                alert("Error al guardar en la nube.");
+                alert("Error de permisos al guardar. Verifique la configuración de Firestore.");
             } finally {
                 loader.style.display = 'none';
             }
         }
 
-        // Funciones de interfaz
+        // Funciones de interfaz globales
         window.parseFile = function(event, key) {
             const file = event.target.files[0];
             if (!file) return;
@@ -255,16 +290,20 @@
         };
 
         window.executeClear = async () => {
-            loader.style.display = 'grid';
+            if (!currentUser) return;
+            loader.style.display = 'flex';
             toggleClearModal(false);
-            const querySnapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'ticketsData'));
-            for (const document of querySnapshot.docs) {
-                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'ticketsData', document.id));
+            try {
+                const querySnapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'ticketsData'));
+                for (const documentDoc of querySnapshot.docs) {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'ticketsData', documentDoc.id));
+                }
+            } catch (e) {
+                console.error("Clear error:", e);
             }
             loader.style.display = 'none';
         };
 
-        // Lógica de visualización (idéntica a tu original optimizada)
         function refreshDashboard() {
             updateKPIs(rawData.reversso, rawData.adereso);
             updateReverssoChart(rawData.reversso);
@@ -289,6 +328,10 @@
                     if (!isNaN(val)) { sum += val; count++; }
                 });
                 document.getElementById('avgGestion').innerText = count > 0 ? (sum / count).toFixed(1) : '0.0';
+            } else {
+                document.getElementById('slaReversso').innerText = '--%';
+                document.getElementById('avgGestion').innerText = '0.0';
+                document.getElementById('slaProgress').firstElementChild.style.width = '0%';
             }
         }
 
@@ -316,7 +359,9 @@
 
         function renderChart(id, type, data, options) {
             if (charts[id]) charts[id].destroy();
-            const ctx = document.getElementById(id).getContext('2d');
+            const canvas = document.getElementById(id);
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
             charts[id] = new Chart(ctx, { type, data, options: { responsive: true, maintainAspectRatio: false, ...options } });
         }
 
@@ -354,7 +399,6 @@
             });
         }
 
-        // Listeners manuales para inputs file (debido a scope de módulos)
         document.getElementById('uploadReversso').addEventListener('change', (e) => window.parseFile(e, 'reversso'));
         document.getElementById('uploadAdereso').addEventListener('change', (e) => window.parseFile(e, 'adereso'));
 
